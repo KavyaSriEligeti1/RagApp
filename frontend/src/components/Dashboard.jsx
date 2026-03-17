@@ -8,11 +8,18 @@ export default function Dashboard() {
     const [isLoading, setIsLoading] = useState(true);
     const [error, setError] = useState('');
 
-    // Modal state
+    // Modal state for Create
     const [showModal, setShowModal] = useState(false);
     const [newDatasetName, setNewDatasetName] = useState('');
     const [newDatasetDesc, setNewDatasetDesc] = useState('');
     const [creating, setCreating] = useState(false);
+
+    // Modal state for Rename
+    const [showRenameModal, setShowRenameModal] = useState(false);
+    const [renameDatasetId, setRenameDatasetId] = useState(null);
+    const [renameName, setRenameName] = useState('');
+    const [renameDesc, setRenameDesc] = useState('');
+    const [renaming, setRenaming] = useState(false);
 
     const checkAuth = () => {
         const token = localStorage.getItem('token');
@@ -82,6 +89,11 @@ export default function Dashboard() {
                 })
             });
 
+            if (response.status === 401) {
+                handleLogout();
+                return;
+            }
+
             if (!response.ok) {
                 const errData = await response.json();
                 throw new Error(errData.detail || 'Failed to create dataset');
@@ -100,8 +112,94 @@ export default function Dashboard() {
         }
     };
 
+    const openRenameModal = (dataset, e) => {
+        e.stopPropagation();
+        setRenameDatasetId(dataset.id);
+        setRenameName(dataset.name);
+        setRenameDesc(dataset.description || '');
+        setShowRenameModal(true);
+    };
+
+    const handleRenameDataset = async (e) => {
+        e.preventDefault();
+        const token = checkAuth();
+        if (!token) return;
+
+        if (!renameName.trim()) return;
+
+        setRenaming(true);
+        setError('');
+
+        try {
+            const response = await fetch(`http://localhost:8000/datasets/${renameDatasetId}`, {
+                method: 'PUT',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${token}`
+                },
+                body: JSON.stringify({
+                    name: renameName,
+                    description: renameDesc
+                })
+            });
+
+            if (response.status === 401) {
+                handleLogout();
+                return;
+            }
+
+            if (!response.ok) {
+                const errData = await response.json();
+                throw new Error(errData.detail || 'Failed to update dataset');
+            }
+
+            setShowRenameModal(false);
+            await fetchDatasets();
+        } catch (err) {
+            setError(err.message);
+        } finally {
+            setRenaming(false);
+        }
+    };
+
+    const handleDeleteDataset = async (datasetId, e) => {
+        e.stopPropagation();
+        const token = checkAuth();
+        if (!token) return;
+
+        if (!window.confirm('Are you sure you want to delete this dataset? This will delete all enclosed documents and chat history permanently.')) {
+            return;
+        }
+
+        setError('');
+        try {
+            const response = await fetch(`http://localhost:8000/datasets/${datasetId}`, {
+                method: 'DELETE',
+                headers: {
+                    'Authorization': `Bearer ${token}`
+                }
+            });
+
+            if (response.status === 401) {
+                handleLogout();
+                return;
+            }
+
+            if (!response.ok) {
+                const errData = await response.json();
+                throw new Error(errData.detail || 'Failed to delete dataset');
+            }
+
+            await fetchDatasets();
+        } catch (err) {
+            setError(err.message);
+        }
+    };
+
     const formatDate = (dateString) => {
-        const date = new Date(dateString);
+        if (!dateString) return '';
+        const utcDateString = dateString.endsWith('Z') ? dateString : `${dateString}Z`;
+        const date = new Date(utcDateString);
         return date.toLocaleDateString() + ' ' + date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
     };
 
@@ -174,16 +272,15 @@ export default function Dashboard() {
                                         <th style={{ padding: '1rem', fontWeight: 600 }}>Name</th>
                                         <th style={{ padding: '1rem', fontWeight: 600 }}>Description</th>
                                         <th style={{ padding: '1rem', fontWeight: 600 }}>Created</th>
+                                        <th style={{ padding: '1rem', fontWeight: 600, textAlign: 'right' }}>Actions</th>
                                     </tr>
                                 </thead>
                                 <tbody>
                                     {datasets.map((ds) => (
                                         <tr
                                             key={ds.id}
-                                            onClick={() => navigate(`/dataset/${ds.id}`)}
                                             style={{
                                                 borderBottom: '1px solid rgba(255,255,255,0.05)',
-                                                cursor: 'pointer',
                                                 transition: 'background 0.2s ease'
                                             }}
                                             onMouseEnter={(e) => e.currentTarget.style.background = 'rgba(255,255,255,0.05)'}
@@ -198,6 +295,31 @@ export default function Dashboard() {
                                             </td>
                                             <td style={{ padding: '1rem', color: 'var(--text-secondary)', fontSize: '0.9rem' }}>
                                                 {formatDate(ds.created_at)}
+                                            </td>
+                                            <td style={{ padding: '1rem', textAlign: 'right' }}>
+                                                <div style={{ display: 'flex', gap: '0.5rem', justifyContent: 'flex-end' }}>
+                                                    <button
+                                                        onClick={() => navigate(`/dataset/${ds.id}`)}
+                                                        className="btn btn-secondary"
+                                                        style={{ padding: '0.4rem 0.75rem', fontSize: '0.85rem' }}
+                                                    >
+                                                        View
+                                                    </button>
+                                                    <button
+                                                        onClick={(e) => openRenameModal(ds, e)}
+                                                        className="btn btn-secondary"
+                                                        style={{ padding: '0.4rem 0.75rem', fontSize: '0.85rem' }}
+                                                    >
+                                                        Rename
+                                                    </button>
+                                                    <button
+                                                        onClick={(e) => handleDeleteDataset(ds.id, e)}
+                                                        className="btn btn-danger"
+                                                        style={{ padding: '0.4rem 0.75rem', fontSize: '0.85rem' }}
+                                                    >
+                                                        Delete
+                                                    </button>
+                                                </div>
                                             </td>
                                         </tr>
                                     ))}
@@ -251,6 +373,54 @@ export default function Dashboard() {
                                     disabled={creating}
                                 >
                                     {creating ? 'Creating...' : 'Create Dataset'}
+                                </button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            )}
+
+            {/* Modal for Renaming Dataset */}
+            {showRenameModal && (
+                <div className="modal-overlay">
+                    <div className="modal-content glass-panel">
+                        <h2 style={{ marginBottom: '1.5rem', fontSize: '1.5rem' }}>Rename Dataset</h2>
+                        <form onSubmit={handleRenameDataset}>
+                            <div className="input-group">
+                                <label>Dataset Name</label>
+                                <input
+                                    type="text"
+                                    className="form-input"
+                                    value={renameName}
+                                    onChange={(e) => setRenameName(e.target.value)}
+                                    required
+                                    autoFocus
+                                />
+                            </div>
+                            <div className="input-group">
+                                <label>Description (Optional)</label>
+                                <input
+                                    type="text"
+                                    className="form-input"
+                                    value={renameDesc}
+                                    onChange={(e) => setRenameDesc(e.target.value)}
+                                />
+                            </div>
+                            <div style={{ display: 'flex', gap: '1rem', justifyContent: 'flex-end', marginTop: '2rem' }}>
+                                <button
+                                    type="button"
+                                    className="btn"
+                                    style={{ background: 'transparent', border: '1px solid rgba(255,255,255,0.2)' }}
+                                    onClick={() => setShowRenameModal(false)}
+                                >
+                                    Cancel
+                                </button>
+                                <button
+                                    type="submit"
+                                    className="btn btn-primary"
+                                    disabled={renaming}
+                                >
+                                    {renaming ? 'Saving...' : 'Save Changes'}
                                 </button>
                             </div>
                         </form>

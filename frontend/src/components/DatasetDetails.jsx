@@ -160,7 +160,9 @@ export default function DatasetDetails() {
     };
 
     const formatDate = (dateString) => {
-        const date = new Date(dateString);
+        if (!dateString) return '';
+        const utcDateString = dateString.endsWith('Z') ? dateString : `${dateString}Z`;
+        const date = new Date(utcDateString);
         return date.toLocaleString();
     };
 

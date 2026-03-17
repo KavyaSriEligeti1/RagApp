@@ -21,8 +21,11 @@ export default function ChatInterface() {
     const [input, setInput] = useState('');
     const [datasets, setDatasets] = useState([]);
     const [selectedDatasetId, setSelectedDatasetId] = useState('');
+    const [sessions, setSessions] = useState([]);
+    const [selectedSessionId, setSelectedSessionId] = useState('new');
     const [isThinking, setIsThinking] = useState(false);
     const [isDropdownOpen, setIsDropdownOpen] = useState(false);
+    const [attachedFile, setAttachedFile] = useState(null);
 
     const checkAuth = () => {
         const token = localStorage.getItem('token');
@@ -60,6 +63,55 @@ export default function ChatInterface() {
         fetchDatasets();
     }, []);
 
+    const fetchSessions = async (datasetId) => {
+        const token = checkAuth();
+        if (!token) return;
+        try {
+            const response = await fetch(`http://localhost:8000/sessions?dataset_id=${datasetId}`, {
+                headers: { 'Authorization': `Bearer ${token}` }
+            });
+            if (response.ok) {
+                const data = await response.json();
+                setSessions(data);
+                if (data.length > 0) {
+                    loadSession(data[0].id.toString());
+                } else {
+                    handleNewChat();
+                }
+            }
+        } catch (err) {
+            console.error("Failed to fetch sessions", err);
+        }
+    };
+
+    const loadSession = async (sessionId) => {
+        setSelectedSessionId(sessionId);
+        const token = checkAuth();
+        if (!token) return;
+        
+        try {
+            const response = await fetch(`http://localhost:8000/sessions/${sessionId}/messages`, {
+                headers: { 'Authorization': `Bearer ${token}` }
+            });
+            if (response.ok) {
+                const data = await response.json();
+                if (data.length === 0) {
+                     setMessages([{ id: 1, role: 'assistant', content: 'Hello! I am your RAG assistant. Please ask me anything about this dataset!' }]);
+                } else {
+                    setMessages(data.map(m => ({ id: m.id, role: m.role, content: m.content, sources: [] })));
+                }
+            }
+        } catch (err) {
+            console.error("Failed to load messages", err);
+        }
+    };
+
+    useEffect(() => {
+        if (selectedDatasetId) {
+            fetchSessions(selectedDatasetId);
+        }
+    }, [selectedDatasetId]);
+
     const handleSend = async (e) => {
         e?.preventDefault();
         if (!input.trim()) return;
@@ -81,13 +133,76 @@ export default function ChatInterface() {
         const token = checkAuth();
         if (!token) return;
 
-        // Add user message
+        let currentSessionId = selectedSessionId;
+        const currentDatasetId = selectedDatasetId; // Capture before async calls
         const userQuery = input;
+
+        // If it's a new chat, create a session first
+        if (currentSessionId === 'new') {
+            try {
+                const res = await fetch('http://localhost:8000/sessions', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+                    body: JSON.stringify({ name: userQuery.substring(0, 30) || (attachedFile ? attachedFile.name : 'New Chat'), dataset_id: parseInt(currentDatasetId, 10) })
+                });
+                if (res.ok) {
+                    const sessionData = await res.json();
+                    currentSessionId = sessionData.id.toString();
+                    setSelectedSessionId(currentSessionId);
+                    setSessions(prev => [sessionData, ...prev]);
+                }
+            } catch (err) {
+                console.error("Failed to create session", err);
+                return;
+            }
+        }
+
+        // If there's an attached file, upload it *before* sending the query
+        if (attachedFile) {
+            const formData = new FormData();
+            formData.append('file', attachedFile);
+            formData.append('dataset_id', currentDatasetId);
+
+            try {
+                setMessages(prev => [...prev, {
+                    id: Date.now() - 1,
+                    role: 'assistant',
+                    content: `Uploading attached document ${attachedFile.name}...`
+                }]);
+
+                const uploadRes = await fetch('http://localhost:8000/upload', {
+                    method: 'POST',
+                    headers: { 'Authorization': `Bearer ${token}` },
+                    body: formData
+                });
+
+                if (!uploadRes.ok) throw new Error('Failed to upload the attached document');
+                
+                setMessages(prev => [...prev, {
+                    id: Date.now() - 2,
+                    role: 'assistant',
+                    content: `Success! ${attachedFile.name} was attached and uploaded. Note: You still need to manually Parse it in the Dataset Details view for me to answer questions about it.`
+                }]);
+
+            } catch (err) {
+                setMessages(prev => [...prev, {
+                    id: Date.now() - 3,
+                    role: 'assistant',
+                    content: `Attachment failed: ${err.message}`
+                }]);
+                return; // Stop execution if upload failed
+            } finally {
+                setAttachedFile(null); // Always clear attaching status
+            }
+        }
+
+        // Add user message
         const newMsg = { id: Date.now(), role: 'user', content: userQuery };
         setMessages(prev => [...prev, newMsg]);
         setInput('');
         setIsThinking(true);
 
+        // Finally, send the chat message
         try {
             const response = await fetch('http://localhost:8000/ask', {
                 method: 'POST',
@@ -97,7 +212,8 @@ export default function ChatInterface() {
                 },
                 body: JSON.stringify({
                     query: userQuery,
-                    dataset_id: parseInt(selectedDatasetId, 10)
+                    dataset_id: parseInt(selectedDatasetId, 10),
+                    session_id: parseInt(currentSessionId, 10)
                 })
             });
 
@@ -166,13 +282,15 @@ export default function ChatInterface() {
     };
 
     const handleNewChat = () => {
+        setSelectedSessionId('new');
         setMessages([
             { id: Date.now(), role: 'assistant', content: 'Starting a fresh conversation. How can I help?' }
         ]);
         setInput('');
+        setAttachedFile(null);
     };
 
-    const handleFileUpload = async (e) => {
+    const handleFileUpload = (e) => {
         const file = e.target.files[0];
         if (!file) return;
 
@@ -180,48 +298,16 @@ export default function ChatInterface() {
             setMessages(prev => [...prev, {
                 id: Date.now(),
                 role: 'assistant',
-                content: 'Please select a context dataset first before uploading a document!'
+                content: 'Please select a context dataset first before attaching a document!'
             }]);
             return;
         }
 
-        const token = checkAuth();
-        if (!token) return;
-
-        const formData = new FormData();
-        formData.append('file', file);
-        formData.append('dataset_id', selectedDatasetId);
-
-        try {
-            setMessages(prev => [...prev, {
-                id: Date.now(),
-                role: 'assistant',
-                content: `Uploading ${file.name}...`
-            }]);
-
-            const response = await fetch('http://localhost:8000/upload', {
-                method: 'POST',
-                headers: {
-                    'Authorization': `Bearer ${token}`
-                },
-                body: formData
-            });
-
-            if (!response.ok) throw new Error('Upload failed');
-
-            setMessages(prev => [...prev, {
-                id: Date.now() + 1,
-                role: 'assistant',
-                content: `Successfully uploaded ${file.name}. You must manually Parse it from the Dataset Details page before I can answer questions about it.`
-            }]);
-
-        } catch (err) {
-            setMessages(prev => [...prev, {
-                id: Date.now() + 1,
-                role: 'assistant',
-                content: `Failed to upload: ${err.message}`
-            }]);
-        }
+        // Just attach it to state so the user can preview it before sending
+        setAttachedFile(file);
+        
+        // Reset file input value so the same file could be selected again if removed
+        e.target.value = null;
     };
 
     return (
@@ -313,10 +399,24 @@ export default function ChatInterface() {
                     </div>
 
                     <p style={{ padding: '0 1rem', fontSize: '0.8rem', color: 'var(--text-secondary)', fontWeight: 600, textTransform: 'uppercase', marginBottom: '0.5rem', marginTop: '1rem' }}>History</p>
-                    <button className="chat-history-item active">
-                        <MessageSquare size={16} />
-                        <span>Current Session</span>
-                    </button>
+                    <div className="sessions-list" style={{ overflowY: 'auto', maxHeight: 'calc(100vh - 250px)' }}>
+                        {sessions.map(sess => (
+                            <button 
+                                key={sess.id}
+                                className={`chat-history-item ${selectedSessionId === sess.id.toString() ? 'active' : ''}`}
+                                onClick={() => loadSession(sess.id.toString())}
+                            >
+                                <MessageSquare size={16} />
+                                <span style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{sess.name}</span>
+                            </button>
+                        ))}
+                        {selectedSessionId === 'new' && (
+                            <button className="chat-history-item active">
+                                <MessageSquare size={16} />
+                                <span>New Chat</span>
+                            </button>
+                        )}
+                    </div>
                 </div>
             </aside>
 
@@ -367,6 +467,42 @@ export default function ChatInterface() {
                 </div>
 
                 <div className="chat-input-container">
+                    {attachedFile && (
+                        <div style={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '0.5rem',
+                            background: 'rgba(59, 130, 246, 0.1)',
+                            border: '1px solid rgba(59, 130, 246, 0.3)',
+                            padding: '0.5rem 0.75rem',
+                            borderRadius: '8px',
+                            marginBottom: '0.75rem',
+                            maxWidth: 'fit-content'
+                        }}>
+                            {attachedFile.type.startsWith('image/') ? <ImageIcon size={16} className="text-accent-primary" /> : <Paperclip size={16} className="text-accent-primary" />}
+                            <span style={{ fontSize: '0.85rem', color: '#f8fafc', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: '200px' }}>
+                                {attachedFile.name}
+                            </span>
+                            <button 
+                                type="button" 
+                                onClick={() => setAttachedFile(null)}
+                                style={{
+                                    background: 'none',
+                                    border: 'none',
+                                    color: 'var(--text-secondary)',
+                                    cursor: 'pointer',
+                                    padding: '2px',
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    justifyContent: 'center',
+                                    marginLeft: '0.25rem'
+                                }}
+                                aria-label="Remove attachment"
+                            >
+                                <Plus size={16} style={{ transform: 'rotate(45deg)' }} />
+                            </button>
+                        </div>
+                    )}
                     <form onSubmit={handleSend} className="chat-input-wrapper">
                         <div className="chat-input-actions-left">
                             <label className="icon-btn" title="Upload Document">
@@ -375,7 +511,7 @@ export default function ChatInterface() {
                             </label>
                             <label className="icon-btn" title="Upload Image (Coming soon)">
                                 <ImageIcon size={20} />
-                                <input type="file" style={{ display: 'none' }} accept="image/*" />
+                                <input type="file" style={{ display: 'none' }} onChange={handleFileUpload} accept="image/*" />
                             </label>
                         </div>
 
